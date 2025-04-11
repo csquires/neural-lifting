@@ -10,7 +10,6 @@
                     "strides": [1, 1],
                     "paddings": [2, 2],
                     "input_shape": [3, 32, 32],
-                    "latent_dim": 84,
                     "pooling": true,
                     "pooling_size": 2,
                     "dropout": true,
