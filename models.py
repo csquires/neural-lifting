@@ -924,3 +924,324 @@ class LeNetLifted(NeuralLiftNet):
             return nn.Softmax(dim=1)
         else:
             return nn.ReLU()
+
+
+
+class ConvResidual(nn.Module):
+    """Residual block for convolutional layers"""
+    def __init__(self, in_channels, hidden_channels, kernel_sizes, strides=None, paddings=None):
+        super(ConvResidual, self).__init__()
+        if strides is None:
+            strides = [1] * len(hidden_channels)
+        if paddings is None:
+            paddings = [1] * len(hidden_channels)
+            
+        layers = []
+        current_channels = in_channels
+        
+        # Add hidden layers
+        for i, out_channels in enumerate(hidden_channels):
+            layers.append(nn.Conv2d(
+                current_channels, 
+                out_channels,
+                kernel_size=kernel_sizes[i],
+                stride=strides[i],
+                padding=paddings[i]
+            ))
+            layers.append(nn.ReLU())
+            current_channels = out_channels
+        
+        # Add final layer back to input channels
+        layers.append(nn.Conv2d(
+            current_channels, 
+            in_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1
+        ))
+        
+        self.layers = nn.Sequential(*layers)
+    
+    def forward(self, x):
+        return F.relu(self.layers(x) + x)
+
+class LeNetLiftedConv(NeuralLiftNet):
+    """
+    LeNet model with convolutional lifter, using the existing Encoder class.
+    
+    The architecture is divided into:
+    - Trunk: Initial conv layers up to the insertion point
+    - Lifter: Conv layers with residual connection
+    - Head: Remaining conv layers + FC layers + classification
+    """
+    def __init__(self, config=None, trunk=None, head=None, lifter=None):
+        self.config = self._get_default_config() if config is None else config
+        
+        # Configure insertion point and architecture
+        self.insert_after_layer = self.config['lifter_config'].get('insert_after_conv_layer', 1)
+        
+        # Initialize with parent class
+        super(LeNetLiftedConv, self).__init__(trunk, head, lifter)
+        
+        # Initialize weights
+        self._initialize_modules(seed=42, init_type='xavier')
+        
+        # Apply special initialization to lifter if specified
+        lifter_config = self.config['lifter_config']
+        if any(key in lifter_config for key in ['init_type', 'sparsity', 'scale']):
+            self._initialize_lifter(
+                init_type=lifter_config.get('init_type', 'kaiming'),
+                sparsity=lifter_config.get('sparsity'),
+                scale=lifter_config.get('scale')
+            )
+    
+    def _get_default_config(self):
+        """Default configuration for LeNetLiftedConv"""
+        return {
+            'trunk_config': {
+                'in_channels': 3,
+                'conv_channels': [6, 16],
+                'conv_kernels': [5, 5],
+                'strides': [1, 1],
+                'paddings': [2, 2],
+                'pooling': True,
+                'dropout': True,
+                'pooling_size': 2,
+                'dropout_rate': 0.1,
+                'input_shape': (3, 32, 32),
+                'latent_dim': 84  # This is needed for compatibility but not used in trunk
+            },
+            'head_config': {
+                'fc_layers': [60, 84],
+                'num_classes': 10
+            },
+            'lifter_config': {
+                'lifter_type': 'Conv',  # Make sure this is set to 'Conv'
+                'conv_channels': [32],
+                'conv_kernels': [3],
+                'strides': [1],
+                'paddings': [1],
+                'insert_after_conv_layer': 1,  # 0-indexed
+                'init_type': 'kaiming',
+                'sparsity': 0.9,
+                'scale': 1.0
+            }
+        }
+    
+    def _create_trunk(self):
+        """Create trunk using Encoder class but only with convolutional layers"""
+        trunk_config = self.config['trunk_config']
+        
+        # Ensure input_shape is consistent with in_channels
+        input_shape = trunk_config['input_shape']
+        in_channels = trunk_config['in_channels']
+        if isinstance(input_shape, (tuple, list)) and input_shape[0] != in_channels:
+            print(f"Warning: Fixing input_shape first dimension from {input_shape[0]} to {in_channels}")
+            input_shape = list(input_shape)
+            input_shape[0] = in_channels
+            trunk_config['input_shape'] = input_shape
+        
+        # Extract parameters for trunk (layers before insertion)
+        conv_channels = trunk_config['conv_channels'][:self.insert_after_layer + 1]
+        conv_kernels = trunk_config['conv_kernels'][:self.insert_after_layer + 1]
+        strides = trunk_config['strides'][:self.insert_after_layer + 1]
+        paddings = trunk_config['paddings'][:self.insert_after_layer + 1]
+        
+        # Create encoder with only conv layers (no FC layers)
+        return Encoder(
+            input_shape,
+            [conv_channels, conv_kernels, strides, paddings],
+            [],  # No FC layers
+            0,   # No latent dim
+            pooling=trunk_config.get('pooling', True),
+            dropout=trunk_config.get('dropout', True),
+            pooling_size=trunk_config.get('pooling_size', 2),
+            dropout_rate=trunk_config.get('dropout_rate', 0.1)
+        )
+    
+    def _create_lifter(self):
+        """Create convolutional lifter with residual connection"""
+        lifter_config = self.config['lifter_config']
+        
+        # Verify that we're using a Conv lifter
+        if lifter_config.get('lifter_type', 'Conv') != 'Conv':
+            print(f"Warning: Expected lifter_type 'Conv', but got '{lifter_config.get('lifter_type')}'. Proceeding with Conv lifter.")
+            
+        # Get feature map shape from trunk
+        with torch.no_grad():
+            trunk_config = self.config['trunk_config']
+            sample_input = torch.zeros(1, *trunk_config['input_shape'])
+            trunk_output = self.trunk(sample_input)
+            
+        # Extract channel count from feature maps
+        in_channels = trunk_output.shape[1]
+        
+        # Create convolutional residual lifter
+        return ConvResidual(
+            in_channels=in_channels,
+            hidden_channels=lifter_config['conv_channels'],
+            kernel_sizes=lifter_config['conv_kernels'],
+            strides=lifter_config.get('strides'),
+            paddings=lifter_config.get('paddings')
+        )
+    
+    def _create_head(self):
+        """Create head (remaining conv layers + FC layers + classifier)"""
+        trunk_config = self.config['trunk_config']
+        head_config = self.config['head_config']
+        
+        # Get remaining conv layers (after insertion point)
+        remaining_conv_channels = trunk_config['conv_channels'][self.insert_after_layer + 1:]
+        remaining_conv_kernels = trunk_config['conv_kernels'][self.insert_after_layer + 1:] if 'conv_kernels' in trunk_config else []
+        remaining_conv_strides = trunk_config['strides'][self.insert_after_layer + 1:] if 'strides' in trunk_config else []
+        remaining_conv_paddings = trunk_config['paddings'][self.insert_after_layer + 1:] if 'paddings' in trunk_config else []
+        
+        # Get feature map shape from trunk output
+        with torch.no_grad():
+            sample_input = torch.zeros(1, *trunk_config['input_shape'])
+            trunk_output = self.trunk(sample_input)
+            feature_map_shape = trunk_output.shape
+        
+        # Create the remaining part of the network as an Encoder
+        if remaining_conv_channels:
+            # If there are remaining conv layers, create an encoder for them
+            remaining_encoder = Encoder(
+                feature_map_shape[1:],  # Shape without batch dimension
+                [remaining_conv_channels, remaining_conv_kernels, remaining_conv_strides, remaining_conv_paddings],
+                head_config['fc_layers'],  # FC layers
+                0,  # No latent_dim (will be handled with final classification layer)
+                pooling=trunk_config.get('pooling', True),
+                dropout=trunk_config.get('dropout', True),
+                pooling_size=trunk_config.get('pooling_size', 2),
+                dropout_rate=trunk_config.get('dropout_rate', 0.1)
+            )
+            
+            # Combine with classification layer
+            with torch.no_grad():
+                temp_output = remaining_encoder(trunk_output)
+                if isinstance(temp_output, torch.Tensor) and len(temp_output.shape) > 2:
+                    # If output is still feature maps, flatten it
+                    remaining_encoder.fc = nn.Sequential(
+                        remaining_encoder.fc,
+                        nn.Flatten()
+                    )
+                    temp_output = remaining_encoder(trunk_output)
+                final_dim = temp_output.shape[1]
+        else:
+            # If no remaining conv layers, just flatten and use FC layers
+            remaining_encoder = nn.Sequential(
+                nn.Flatten(),
+                nn.Linear(feature_map_shape[1] * feature_map_shape[2] * feature_map_shape[3], head_config['fc_layers'][0]),
+                nn.ReLU()
+            )
+            
+            for i in range(1, len(head_config['fc_layers'])):
+                remaining_encoder.add_module(f"fc{i}", nn.Linear(head_config['fc_layers'][i-1], head_config['fc_layers'][i]))
+                remaining_encoder.add_module(f"relu{i}", nn.ReLU())
+            
+            final_dim = head_config['fc_layers'][-1]
+        
+        # Final classification layer
+        classification_layer = nn.Linear(final_dim, head_config['num_classes'])
+        
+        return nn.Sequential(remaining_encoder, classification_layer)
+    
+    def forward(self, x):
+        """Forward pass with optional lifting"""
+        z = self.trunk(x)
+        if self.lift:
+            z = self.lifter(z)
+        y = self.head(z)
+        return y, z
+    
+    def _initialize_modules(self, seed=42, init_type='xavier'):
+        """Initialize all model weights"""
+        torch.manual_seed(seed)
+        def init_weights(m):
+            if isinstance(m, (nn.Linear, nn.Conv2d)):
+                if init_type == 'kaiming':
+                    nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                elif init_type == 'xavier':
+                    nn.init.xavier_normal_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+        
+        self.trunk.apply(init_weights)
+        self.head.apply(init_weights)
+        self.lifter.apply(init_weights)
+
+    def _initialize_lifter(self, init_type='kaiming', sparsity=None, scale=None):
+        """Initialize lifter weights with optional sparsity"""
+        if sparsity is not None and not (0 <= sparsity <= 1):
+            raise ValueError("sparsity must be between 0 and 1")
+        
+        print(f"Initializing lifter with {init_type} initialization, sparsity={sparsity}, scale={scale}")
+        
+        def init_weights(m):
+            if isinstance(m, nn.Conv2d):
+                # Step 1: Base initialization
+                if init_type == 'kaiming':
+                    init.kaiming_normal_(m.weight, a=0, mode='fan_in', nonlinearity='relu')
+                elif init_type == 'xavier':
+                    init.xavier_normal_(m.weight, gain=1.0)
+                elif init_type == 'normal':
+                    init.normal_(m.weight, mean=0, std=0.01)
+                elif init_type == 'zeros':
+                    init.zeros_(m.weight)
+                else:
+                    raise ValueError(f"Unknown initialization type: {init_type}")
+                
+                # Apply scaling
+                if scale is not None and scale is not False:
+                    m.weight.data *= scale
+                
+                # Step 2: Apply sparsity if requested
+                if sparsity is not None:
+                    # Create binary mask
+                    mask = (torch.rand_like(m.weight) > sparsity)
+                    # Apply mask and rescale to maintain variance
+                    if mask.sum() > 0:  # Prevent division by zero
+                        m.weight.data *= mask / math.sqrt(1 - sparsity)
+                
+                # Initialize bias to zero if it exists
+                if m.bias is not None:
+                    init.zeros_(m.bias)
+        
+        self.lifter.apply(init_weights)
+    
+    def get_param_counts(self):
+        """Get parameter counts for each module and total"""
+        def count_parameters(model):
+            return sum(p.numel() for p in model.parameters())
+        
+        trunk_params = count_parameters(self.trunk)
+        head_params = count_parameters(self.head)
+        lifter_params = count_parameters(self.lifter)
+        
+        return {
+            'trunk': trunk_params,
+            'head': head_params,
+            'base_model': trunk_params + head_params,
+            'lifter': lifter_params,
+            'total': trunk_params + head_params + lifter_params,
+            'lifter_percentage': lifter_params / (trunk_params + head_params) * 100
+        }
+    
+    def get_lifter_stats(self):
+        """Calculate statistics of the lifter weights"""
+        stats = {}
+        for name, module in self.lifter.named_modules():
+            if isinstance(module, nn.Conv2d):
+                weights = module.weight.data
+                total = weights.numel()
+                zeros = (weights == 0).sum().item()
+                stats[name] = {
+                    'sparsity': zeros / total,
+                    'mean': weights.mean().item(),
+                    'std': weights.std().item(),
+                    'min': weights.min().item(),
+                    'max': weights.max().item(),
+                    'total_weights': total,
+                    'zero_weights': zeros
+                }
+        return stats
