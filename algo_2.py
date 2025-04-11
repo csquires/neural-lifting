@@ -6,7 +6,7 @@ import numpy as np
 from sklearn.model_selection import KFold
 from collections import defaultdict
 import json
-from models import LeNetLifted
+from models import LeNetLifted, LeNetLiftedConv
 from tqdm import tqdm
 from dir_names import *
 from visualisers import plot_metrics
@@ -338,6 +338,36 @@ class ModelTrainer:
             print(f"Initialising model with Model config: {model_config}")
             # Create model
             model = LeNetLifted(config=model_config)
+            # Initialize parameters before moving to device
+            print(f'Initializing model with seed: {self.config["seed"]}')
+            model._initialize_modules(seed=self.config['seed'], init_type=self.config.get('init_type', 'xavier'))
+            # Initialize lifter if specified
+            print(f'Lifter init: {self.config.get("lifter_init")}')
+            if self.config.get('lifter_init'):
+                model._initialize_lifter(init_type=self.lifter_config.get('init_type', 'xavier'),
+                                        sparsity=self.lifter_config.get('sparsity', 0.0),
+                                        scale=self.lifter_config.get('scale', None))
+            
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
+            # Move to device first
+            model = model.to(device)
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+            
+            # Apply DataParallel after moving to device
+            if torch.cuda.device_count() > 1:
+                model = torch.nn.DataParallel(model)
+                
+            self.model = model
+            return self.model
+        if self.config['model_type'] == 'LeNetLiftedConv':
+            print(f'self.config: {self.config}')
+            # Get the correct config structure
+            model_config = self.config['model_config']['params'] if 'params' in self.config['model_config'] else self.config['model_config']
+            print(f"Initialising model with Model config: {model_config}")
+            # Create model
+            model = LeNetLiftedConv(config=model_config)
             # Initialize parameters before moving to device
             print(f'Initializing model with seed: {self.config["seed"]}')
             model._initialize_modules(seed=self.config['seed'], init_type=self.config.get('init_type', 'xavier'))

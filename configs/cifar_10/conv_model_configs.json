@@ -1,0 +1,57 @@
+{
+    "model_configs": {
+        "LeNetLiftedConv": {
+            "type": "LeNetLiftedConv",
+            "params": {
+                "trunk_config": {
+                    "in_channels": 3,
+                    "conv_channels": [6, 16],
+                    "conv_kernels": [5, 5],
+                    "strides": [1, 1],
+                    "paddings": [2, 2],
+                    "input_shape": [3, 32, 32],
+                    "latent_dim": 84,
+                    "pooling": true,
+                    "pooling_size": 2,
+                    "dropout": true,
+                    "dropout_rate": 0.41003508265236294
+                },
+                "head_config": {
+                    "fc_layers": [60, 84],
+                    "num_classes": 10
+                },
+                "lifter_config": {
+                    "lifter_type": "ConvResidual",
+                    "conv_channels": [32],
+                    "conv_kernels": [3],
+                    "strides": [1],
+                    "paddings": [1],
+                    "insert_after_conv_layer": 1,
+                    "init_type": "zeros",
+                    "scale": 1.0,
+                    "sparsity": 0.99,
+                    "pooling": false
+                }
+            }
+        }
+    },
+    "training_params": {
+        "batch_size": 128,
+        "epochs": 1000,
+        "lr": 0.002,
+        "lr_shortcut": 0.049694120994647054,
+        "lr_lifted": 0.006976459781829131,
+        "lr_matching": 0.0016344194580221348,
+        "weight_decay": 0.0001,
+        "n_folds": 1,
+        "test_size": 10000,
+        "early_stopping": true,
+        "patience": 17,
+        "gradient_clip": 4.5,
+        "cycles": 2,
+        "alpha": 0.0,
+        "max_epochs_per_phase": 50,
+        "model_type": "LeNetLiftedConv",
+        "seed": 42
+    }
+}
